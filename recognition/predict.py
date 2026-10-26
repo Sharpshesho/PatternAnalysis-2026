@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import platform
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +27,7 @@ from sklearn.metrics import (
 from torch_geometric.data import Data
 
 from dataset import load_facebook_page_page
-from train import create_model, load_checkpoint, resolve_device
+from train import create_model, forward_model, load_checkpoint, resolve_device
 
 
 PAGE_CLASSES = {
@@ -95,6 +97,102 @@ def predict_scores(
         )
 
     return outputs
+
+
+def measure_inference(
+    model: nn.Module,
+    data: Data,
+    model_name: str,
+    warmup_runs: int = 5,
+    repeats: int = 30,
+) -> dict[str, Any]:
+    """Time full-graph forward passes with inputs already on the device.
+
+    Loading, device transfer, metrics, confidence analysis, and plotting are
+    excluded. Per-node time is an amortized figure, not isolated-node latency.
+    """
+
+    if warmup_runs < 0:
+        raise ValueError("timing-warmup cannot be negative")
+    if repeats < 1:
+        raise ValueError("timing-runs must be at least 1")
+
+    device = data.x.device
+    use_cuda = device.type == "cuda"
+    model.eval()
+    baseline_memory = None
+    peak_memory = None
+    extra_memory = None
+    timings_ms = []
+
+    print(f"> Timing full-graph inference: {warmup_runs} warmups, {repeats} runs")
+    with torch.no_grad():
+        for _ in range(warmup_runs):
+            outputs = forward_model(model, data, model_name)
+            if use_cuda:
+                torch.cuda.synchronize(device)
+            del outputs
+
+        if use_cuda:
+            torch.cuda.synchronize(device)
+            baseline_memory = torch.cuda.memory_allocated(device)
+            torch.cuda.reset_peak_memory_stats(device)
+
+        for _ in range(repeats):
+            if use_cuda:
+                torch.cuda.synchronize(device)
+            start = time.perf_counter()
+            outputs = forward_model(model, data, model_name)
+            if use_cuda:
+                torch.cuda.synchronize(device)
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            timings_ms.append(elapsed_ms)
+            del outputs
+
+        if use_cuda:
+            peak_memory = torch.cuda.max_memory_allocated(device)
+            extra_memory = max(0, peak_memory - baseline_memory)
+
+    mean_ms = float(np.mean(timings_ms))
+    memory_scale = 1024.0 ** 2
+    device_name = (
+        torch.cuda.get_device_name(device)
+        if use_cuda else platform.processor() or platform.machine()
+    )
+    return {
+        "scope": "full_graph_forward_only",
+        "device": str(device),
+        "device_name": device_name,
+        "torch_version": str(torch.__version__),
+        "torch_cpu_threads": torch.get_num_threads(),
+        "num_nodes": int(data.num_nodes),
+        "num_directed_edge_entries": int(data.edge_index.shape[1]),
+        "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
+        "warmup_runs": warmup_runs,
+        "timed_runs": repeats,
+        "mean_ms": mean_ms,
+        "median_ms": float(np.median(timings_ms)),
+        "std_ms": float(np.std(timings_ms)),
+        "min_ms": float(min(timings_ms)),
+        "max_ms": float(max(timings_ms)),
+        "timings_ms": timings_ms,
+        "amortized_mean_microseconds_per_node": mean_ms * 1000.0 / data.num_nodes,
+        "cuda_baseline_allocated_mib": (
+            baseline_memory / memory_scale if use_cuda else None
+        ),
+        "cuda_peak_allocated_mib": (
+            peak_memory / memory_scale if use_cuda else None
+        ),
+        "cuda_peak_increment_mib": (
+            extra_memory / memory_scale if use_cuda else None
+        ),
+        "memory_note": (
+            "PyTorch peak allocated tensor memory during timed inference, "
+            "including model and input tensors; excludes CUDA context and "
+            "other processes. This is not training peak memory."
+            if use_cuda else "GPU memory is not applicable to this CPU run."
+        ),
+    }
 
 
 def get_node_embeddings(
@@ -785,6 +883,13 @@ def run_prediction(args: argparse.Namespace) -> None:
     else:
         mask = getattr(data, f"{args.split}_mask")
 
+    inference_profile = measure_inference(
+        model,
+        data,
+        model_name,
+        warmup_runs=args.timing_warmup,
+        repeats=args.timing_runs,
+    )
     outputs = predict_scores(model, data, model_name)
     metrics = calculate_metrics(outputs, data.y, mask)
     metrics.update(
@@ -794,6 +899,7 @@ def run_prediction(args: argparse.Namespace) -> None:
             "split": args.split,
             "best_epoch": checkpoint.get("best_epoch"),
             "checkpoint": str(args.checkpoint.resolve()),
+            "inference_profile": inference_profile,
         }
     )
 
@@ -824,6 +930,11 @@ def run_prediction(args: argparse.Namespace) -> None:
         metrics,
     )
 
+    with (run_dir / "inference_profile.json").open(
+        "w", encoding="utf-8"
+    ) as handle:
+        json.dump(inference_profile, handle, indent=2, allow_nan=False)
+
     save_confidence_analysis(run_dir, rule, confidence_curve)
 
     if not args.skip_embedding_plot:
@@ -847,6 +958,18 @@ def run_prediction(args: argparse.Namespace) -> None:
     print(f"Accuracy: {metrics['accuracy']:.4f}")
     print(f"Macro-F1: {metrics['macro_f1']:.4f}")
     print(f"Macro AUROC (one-vs-rest): {auc_text}")
+    print(
+        f"Full-graph inference: {inference_profile['mean_ms']:.3f} ms mean, "
+        f"{inference_profile['median_ms']:.3f} ms median "
+        f"({inference_profile['timed_runs']} timed runs)"
+    )
+    if inference_profile["cuda_peak_allocated_mib"] is None:
+        print("Peak GPU memory: not applicable (CPU run)")
+    else:
+        print(
+            "Peak PyTorch GPU memory during inference: "
+            f"{inference_profile['cuda_peak_allocated_mib']:.2f} MiB"
+        )
     selective = metrics["selective_prediction"]
     accepted_accuracy = selective["accepted_accuracy"]
     accepted_text = (
@@ -919,6 +1042,19 @@ def parse_args() -> argparse.Namespace:
         "--skip-embedding-plot",
         action="store_true",
         help="Skip t-SNE when only prediction metrics are needed",
+    )
+
+    parser.add_argument(
+        "--timing-warmup",
+        type=int,
+        default=5,
+        help="Untimed warmup forward passes (default: 5)",
+    )
+    parser.add_argument(
+        "--timing-runs",
+        type=int,
+        default=30,
+        help="Measured full-graph forward passes (default: 30)",
     )
 
     return parser.parse_args()
