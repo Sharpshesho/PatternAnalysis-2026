@@ -1,8 +1,8 @@
 """Prediction, evaluation, and result exports for Facebook page classification.
 
-This partial version restores a trained MLP or GCN, returns class scores,
-evaluates a selected split, and exports JSON and CSV results.
-Confusion-matrix plots and the full workflow remain unfinished.
+Restore a trained MLP or GCN, evaluate a selected split, and export the results.
+Use the same facebook.npz archive as training; the checkpoint supplies the
+model configuration and seed needed to recreate the training split.
 """
 
 from __future__ import annotations
@@ -24,7 +24,8 @@ from sklearn.metrics import (
 )
 from torch_geometric.data import Data
 
-from train import create_model, load_checkpoint
+from dataset import load_facebook_page_page
+from train import create_model, load_checkpoint, resolve_device
 
 
 PAGE_CLASSES = {
@@ -181,6 +182,99 @@ def calculate_metrics(
     }
 
 
+def save_confusion_matrix(
+    output_dir: Path,
+    metrics: dict[str, Any],
+    class_names: list[str],
+) -> None:
+    """Save matrix counts, normalized values, and a labelled plot."""
+
+    matrix = np.asarray(metrics["confusion_matrix"])
+    normalized_matrix = np.asarray(
+        metrics["normalized_confusion_matrix"]
+    )
+    expected_shape = (len(class_names), len(class_names))
+
+    if matrix.shape != expected_shape or normalized_matrix.shape != expected_shape:
+        raise ValueError(
+            "Confusion matrices must be square and match the class names"
+        )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for filename, values in (
+        ("confusion_matrix.csv", matrix),
+        ("confusion_matrix_normalized.csv", normalized_matrix),
+    ):
+        with (output_dir / filename).open(
+            "w",
+            encoding="utf-8",
+            newline="",
+        ) as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                ["true_class / predicted_class", *class_names]
+            )
+
+            for class_name, row in zip(class_names, values):
+                writer.writerow([class_name, *row.tolist()])
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figure, axis = plt.subplots(figsize=(7, 6))
+    plot = axis.imshow(
+        normalized_matrix,
+        cmap="Blues",
+        vmin=0.0,
+        vmax=1.0,
+    )
+    figure.colorbar(
+        plot,
+        ax=axis,
+        label="Proportion within true class",
+    )
+
+    model_name = str(metrics.get("model", "classifier")).upper()
+    split_name = metrics.get("split", "selected split")
+
+    axis.set(
+        xticks=range(len(class_names)),
+        yticks=range(len(class_names)),
+        xticklabels=class_names,
+        yticklabels=class_names,
+        xlabel="Predicted category",
+        ylabel="True category",
+        title=f"{model_name} confusion matrix ({split_name})",
+    )
+    plt.setp(
+        axis.get_xticklabels(),
+        rotation=30,
+        ha="right",
+    )
+
+    for row in range(len(class_names)):
+        for column in range(len(class_names)):
+            value = normalized_matrix[row, column]
+            axis.text(
+                column,
+                row,
+                f"{value:.2f}",
+                ha="center",
+                va="center",
+                color="white" if value > 0.5 else "black",
+            )
+
+    figure.tight_layout()
+    figure.savefig(
+        output_dir / "confusion_matrix.png",
+        dpi=160,
+    )
+    plt.close(figure)
+
+
 def save_prediction_outputs(
     output_dir: Path,
     data: Data,
@@ -188,7 +282,7 @@ def save_prediction_outputs(
     mask: torch.Tensor,
     metrics: dict[str, Any],
 ) -> None:
-    """Save metrics and prediction CSV files for a selected split."""
+    """Save metrics, predictions, failure candidates, and confusion matrices."""
 
     output_dir.mkdir(
         parents=True,
@@ -303,13 +397,89 @@ def save_prediction_outputs(
             writer.writeheader()
             writer.writerows(selected_rows)
 
+    save_confusion_matrix(
+        output_dir,
+        report,
+        class_names,
+    )
+
 
 def run_prediction(args: argparse.Namespace) -> None:
     """Load the model, recreate its seeded split, and evaluate predictions."""
 
-    raise NotImplementedError(
-        "The complete prediction workflow will be implemented later"
+    device = resolve_device(args.device)
+    model, checkpoint = load_trained_model(
+        args.checkpoint,
+        device,
     )
+    config = checkpoint["model_config"]
+    model_name = config["model_name"]
+    seed = int(checkpoint["seed"])
+
+    print(f"> Device: {device}")
+    print(
+        f"> Loading {model_name.upper()} checkpoint (seed {seed})"
+    )
+
+    data = load_facebook_page_page(
+        args.data_path,
+        seed=seed,
+    )
+
+    if int(data.x.shape[1]) != config["in_channels"]:
+        raise ValueError(
+            "Dataset feature count differs from the trained model"
+        )
+
+    if int(data.num_classes) != config["out_channels"]:
+        raise ValueError(
+            "Dataset class count differs from the trained model"
+        )
+
+    if list(data.class_values) != list(checkpoint["class_values"]):
+        raise ValueError(
+            "Dataset class order differs from the training checkpoint"
+        )
+
+    data = data.to(device)
+
+    if args.split == "all":
+        mask = torch.ones_like(data.y, dtype=torch.bool)
+    else:
+        mask = getattr(data, f"{args.split}_mask")
+
+    outputs = predict_scores(model, data, model_name)
+    metrics = calculate_metrics(outputs, data.y, mask)
+    metrics.update(
+        {
+            "model": model_name,
+            "seed": seed,
+            "split": args.split,
+            "best_epoch": checkpoint.get("best_epoch"),
+            "checkpoint": str(args.checkpoint.resolve()),
+        }
+    )
+
+    run_dir = (
+        args.output_dir
+        / f"{model_name}_seed{seed}_{args.split}"
+    )
+    save_prediction_outputs(
+        run_dir,
+        data,
+        outputs,
+        mask,
+        metrics,
+    )
+
+    auc = metrics["macro_auroc_ovr"]
+    auc_text = "undefined" if auc is None else f"{auc:.4f}"
+
+    print(f"Evaluated pages: {metrics['count']}")
+    print(f"Accuracy: {metrics['accuracy']:.4f}")
+    print(f"Macro-F1: {metrics['macro_f1']:.4f}")
+    print(f"Macro AUROC (one-vs-rest): {auc_text}")
+    print(f"Saved prediction outputs to: {run_dir.resolve()}")
 
 
 def parse_args() -> argparse.Namespace:
