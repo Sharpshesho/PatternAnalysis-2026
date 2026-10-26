@@ -1,7 +1,7 @@
-"""Checkpoint loading for Facebook page classification.
+"""Checkpoint loading and prediction for Facebook page classification.
 
-This partial version restores a trained MLP or GCN from its checkpoint.
-Prediction, evaluation metrics, and result exports remain unfinished.
+This partial version restores a trained MLP or GCN and returns class scores.
+Evaluation metrics, result exports, and the full workflow remain unfinished.
 """
 
 from __future__ import annotations
@@ -55,9 +55,27 @@ def predict_scores(
 ) -> torch.Tensor:
     """Return class scores using model.eval() and torch.no_grad()."""
 
-    raise NotImplementedError(
-        "The prediction forward pass will be implemented next"
-    )
+    model.eval()
+
+    with torch.no_grad():
+        if model_name == "mlp":
+            outputs = model(data.x)
+        elif model_name == "gcn":
+            outputs = model(
+                data.x,
+                data.edge_index,
+            )
+        else:
+            raise ValueError(
+                f"Unknown model name: {model_name!r}"
+            )
+
+    if not bool(torch.isfinite(outputs).all()):
+        raise ValueError(
+            "Model predictions contain NaN or infinite values"
+        )
+
+    return outputs
 
 
 def calculate_metrics(
