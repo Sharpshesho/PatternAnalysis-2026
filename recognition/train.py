@@ -1,8 +1,8 @@
 """Training workflow for Facebook page classification.
 
-This initial skeleton defines the training interface and experiment settings.
-The training loop, validation procedure, checkpoint saving, and final
-evaluation will be implemented in later steps.
+This partial implementation provides model construction and a single training
+step. Validation, experiment control, and checkpoint saving will be added in
+later development steps.
 """
 
 from __future__ import annotations
@@ -36,9 +36,48 @@ def create_model(
 ) -> nn.Module:
     """Create either the MLP baseline or the two-layer GCN."""
 
-    raise NotImplementedError(
-        "Model creation will be implemented next"
-    )
+    if model_name == "mlp":
+        model = MLPBaseline(
+            in_channels=in_channels,
+            hidden_channels=hidden_channels,
+            out_channels=out_channels,
+            dropout_p=dropout_p,
+        )
+    elif model_name == "gcn":
+        model = TwoLayerGCN(
+            in_channels=in_channels,
+            hidden_channels=hidden_channels,
+            out_channels=out_channels,
+            dropout_p=dropout_p,
+        )
+    else:
+        raise ValueError(
+            f"Unknown model name: {model_name!r}"
+        )
+
+    return model
+
+
+def forward_model(
+    model: nn.Module,
+    data: Data,
+    model_name: str,
+) -> torch.Tensor:
+    """Run the correct forward pass for the selected model."""
+
+    if model_name == "mlp":
+        outputs = model(data.x)
+    elif model_name == "gcn":
+        outputs = model(
+            data.x,
+            data.edge_index,
+        )
+    else:
+        raise ValueError(
+            f"Unknown model name: {model_name!r}"
+        )
+
+    return outputs
 
 
 def train_one_epoch(
@@ -50,9 +89,24 @@ def train_one_epoch(
 ) -> float:
     """Train the selected model for one epoch."""
 
-    raise NotImplementedError(
-        "The training step will be implemented later"
+    model.train()
+
+    outputs = forward_model(
+        model,
+        data,
+        model_name,
     )
+
+    loss = criterion(
+        outputs[data.train_mask],
+        data.y[data.train_mask],
+    )
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    return float(loss.item())
 
 
 def evaluate(
@@ -64,7 +118,7 @@ def evaluate(
     """Evaluate the selected model on one dataset split."""
 
     raise NotImplementedError(
-        "Model evaluation will be implemented later"
+        "Model evaluation will be implemented next"
     )
 
 
@@ -72,7 +126,7 @@ def run_training(args: argparse.Namespace) -> None:
     """Run the complete training and validation experiment."""
 
     raise NotImplementedError(
-        "The complete experiment will be implemented later"
+        "The complete training experiment will be implemented later"
     )
 
 
