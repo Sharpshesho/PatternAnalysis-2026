@@ -97,6 +97,177 @@ def predict_scores(
     return outputs
 
 
+def get_node_embeddings(
+    model: nn.Module,
+    data: Data,
+    model_name: str,
+) -> torch.Tensor:
+    """Return first-layer hidden features after ReLU, before dropout."""
+
+    model.eval()
+    with torch.no_grad():
+        if model_name == "mlp":
+            embeddings = model.linear1(data.x)
+        elif model_name == "gcn":
+            # Use the full graph so every node keeps its original neighbours.
+            embeddings = model.conv1(data.x, data.edge_index)
+        else:
+            raise ValueError(f"Unknown model name: {model_name!r}")
+
+        embeddings = model.relu(embeddings)
+
+    if not bool(torch.isfinite(embeddings).all()):
+        raise ValueError("Hidden features contain NaN or infinite values")
+
+    return embeddings.detach().cpu()
+
+
+def save_embedding_plot(
+    output_dir: Path,
+    embeddings: torch.Tensor,
+    outputs: torch.Tensor,
+    data: Data,
+    mask: torch.Tensor,
+    model_name: str,
+    seed: int,
+    split_name: str,
+    max_nodes: int = 2000,
+) -> None:
+    """Project learned hidden features to 2D, then colour by true category.
+
+    Sampling and t-SNE use no labels. Separate model projections have arbitrary
+    axes and should be interpreted as qualitative views of local structure.
+    """
+
+    if max_nodes < 3:
+        raise ValueError("embedding-max-nodes must be at least 3")
+
+    node_indices = mask.detach().cpu().nonzero(as_tuple=False).flatten().numpy()
+    available_nodes = len(node_indices)
+    if available_nodes < 3:
+        print("Skipped t-SNE: at least three selected pages are needed")
+        return
+
+    # A label-independent sample keeps the same pages across both models.
+    if available_nodes > max_nodes:
+        rng = np.random.default_rng(seed)
+        node_indices = np.sort(
+            rng.choice(node_indices, size=max_nodes, replace=False)
+        )
+
+    features = embeddings.detach().cpu()[node_indices].numpy()
+    perplexity = min(30.0, float(len(node_indices) - 1))
+    initialization = "pca" if features.shape[1] >= 2 else "random"
+
+    from sklearn.manifold import TSNE
+
+    print(f"> Creating t-SNE plot for {len(node_indices)} {split_name} pages")
+    projection = TSNE(
+        n_components=2,
+        perplexity=perplexity,
+        init=initialization,
+        learning_rate="auto",
+        max_iter=1000,
+        random_state=seed,
+        n_jobs=1,
+    )
+    coordinates = projection.fit_transform(features)
+    if not bool(np.isfinite(coordinates).all()):
+        raise ValueError("t-SNE produced non-finite coordinates")
+
+    # Ground-truth labels are read only after calculating point positions.
+    labels = data.y.detach().cpu()[node_indices].numpy()
+    predictions = outputs.detach().cpu()[node_indices].argmax(dim=1).numpy()
+    class_names = [
+        PAGE_CLASSES.get(str(value), str(value))
+        for value in data.class_values
+    ]
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with (output_dir / "embedding_tsne.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            ["node_index", "page_name", "true_class", "predicted_class", "tsne_1", "tsne_2"]
+        )
+        for row, node_index in enumerate(node_indices):
+            writer.writerow(
+                [
+                    int(node_index),
+                    data.page_name[int(node_index)],
+                    class_names[int(labels[row])],
+                    class_names[int(predictions[row])],
+                    float(coordinates[row, 0]),
+                    float(coordinates[row, 1]),
+                ]
+            )
+
+    settings = {
+        "model": model_name,
+        "seed": seed,
+        "split": split_name,
+        "representation": "first hidden layer after ReLU, before dropout",
+        "hidden_dimensions": int(features.shape[1]),
+        "available_nodes": available_nodes,
+        "plotted_nodes": len(node_indices),
+        "maximum_nodes": max_nodes,
+        "sampling": "uniform without replacement, seeded, independent of labels",
+        "perplexity": perplexity,
+        "initialization": initialization,
+        "learning_rate": "auto",
+        "max_iter": 1000,
+        "n_jobs": 1,
+        "interpretation": (
+            "Qualitative local structure only; axes and global distances "
+            "are not directly comparable between separate projections"
+        ),
+    }
+    with (output_dir / "embedding_tsne_settings.json").open(
+        "w", encoding="utf-8"
+    ) as handle:
+        json.dump(settings, handle, indent=2, allow_nan=False)
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figure, axis = plt.subplots(figsize=(10, 6))
+    for class_index, class_name in enumerate(class_names):
+        selected = labels == class_index
+        axis.scatter(
+            coordinates[selected, 0],
+            coordinates[selected, 1],
+            color=f"C{class_index}",
+            s=10,
+            alpha=0.65,
+            linewidths=0,
+            label=f"{class_name} (n={int(selected.sum())})",
+        )
+
+    axis.set(
+        title=(
+            f"{model_name.upper()} hidden representations: t-SNE\n"
+            f"{len(node_indices)}/{available_nodes} {split_name} pages | seed {seed}"
+        ),
+        xlabel="t-SNE dimension 1",
+        ylabel="t-SNE dimension 2",
+    )
+    axis.legend(
+        title="True page category", markerscale=2,
+        loc="upper left", bbox_to_anchor=(1.02, 1.0),
+    )
+    figure.text(
+        0.5, 0.015,
+        "Colours show true categories. t-SNE axes are arbitrary.",
+        ha="center", fontsize=9,
+    )
+    figure.tight_layout(rect=(0, 0.035, 1, 1))
+    figure.savefig(output_dir / "embedding_tsne.png", dpi=160)
+    plt.close(figure)
+
+
 def calculate_metrics(
     outputs: torch.Tensor,
     labels: torch.Tensor,
@@ -655,6 +826,20 @@ def run_prediction(args: argparse.Namespace) -> None:
 
     save_confidence_analysis(run_dir, rule, confidence_curve)
 
+    if not args.skip_embedding_plot:
+        embeddings = get_node_embeddings(model, data, model_name)
+        save_embedding_plot(
+            run_dir,
+            embeddings,
+            outputs,
+            data,
+            mask,
+            model_name,
+            seed,
+            args.split,
+            max_nodes=args.embedding_max_nodes,
+        )
+
     auc = metrics["macro_auroc_ovr"]
     auc_text = "undefined" if auc is None else f"{auc:.4f}"
 
@@ -722,6 +907,18 @@ def parse_args() -> argparse.Namespace:
             "Experiment setting: minimum fraction of validation predictions "
             "accepted when choosing the confidence threshold (default: 0.5)"
         ),
+    )
+
+    parser.add_argument(
+        "--embedding-max-nodes",
+        type=int,
+        default=2000,
+        help="Maximum pages in the seeded t-SNE sample (default: 2000)",
+    )
+    parser.add_argument(
+        "--skip-embedding-plot",
+        action="store_true",
+        help="Skip t-SNE when only prediction metrics are needed",
     )
 
     return parser.parse_args()
