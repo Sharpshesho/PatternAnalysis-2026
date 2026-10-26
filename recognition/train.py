@@ -220,6 +220,73 @@ def save_history(
         writer.writerows(history)
 
 
+def save_training_curves(
+    path: Path,
+    history: list[dict[str, float | int]],
+    model_name: str,
+    seed: int,
+    best_epoch: int,
+) -> None:
+    """Plot training and validation metrics recorded after each epoch."""
+
+    if not history:
+        raise ValueError("Training history cannot be empty")
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import MaxNLocator
+
+    epochs = [row["epoch"] for row in history]
+    figure, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+
+    for axis, metric, title in zip(
+        axes,
+        ("loss", "accuracy", "macro_f1"),
+        ("Loss", "Accuracy", "Macro-F1"),
+    ):
+        axis.plot(
+            epochs,
+            [row[f"train_{metric}"] for row in history],
+            marker="o" if len(epochs) <= 20 else None,
+            label="Training",
+        )
+        axis.plot(
+            epochs,
+            [row[f"validation_{metric}"] for row in history],
+            marker="o" if len(epochs) <= 20 else None,
+            linestyle="--",
+            label="Validation",
+        )
+        axis.axvline(
+            best_epoch,
+            color="black",
+            linestyle="--",
+            alpha=0.6,
+            label=f"Validation-selected epoch: {best_epoch}",
+        )
+        axis.set(title=title, xlabel="Epoch", ylabel=title)
+        axis.xaxis.set_major_locator(MaxNLocator(integer=True, min_n_ticks=1))
+        axis.ticklabel_format(axis="y", style="plain", useOffset=False)
+
+        if len(epochs) == 1:
+            axis.set_xlim(epochs[0] - 0.5, epochs[0] + 0.5)
+        else:
+            axis.set_xlim(epochs[0], epochs[-1])
+        if metric != "loss":
+            axis.set_ylim(0.0, 1.0)
+
+        axis.grid(alpha=0.3)
+        axis.legend(fontsize=8)
+
+    figure.suptitle(f"{model_name.upper()} training history (seed {seed})")
+    figure.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(path, dpi=160)
+    plt.close(figure)
+
+
 def load_checkpoint(
     path: Path,
     device: torch.device,
@@ -298,6 +365,7 @@ def run_training(args: argparse.Namespace) -> None:
     run_name = f"{args.model}_seed{args.seed}"
     checkpoint_path = args.output_dir / f"{run_name}_best.pt"
     history_path = args.output_dir / f"{run_name}_history.csv"
+    curves_path = args.output_dir / f"{run_name}_training_curves.png"
     results_path = args.output_dir / f"{run_name}_results.json"
 
     history: list[dict[str, float | int]] = []
@@ -459,6 +527,14 @@ def run_training(args: argparse.Namespace) -> None:
             indent=2,
         )
 
+    save_training_curves(
+        curves_path,
+        history,
+        args.model,
+        args.seed,
+        best_epoch,
+    )
+
     print("> Final results")
     print(
         f"Best epoch: {best_epoch} | "
@@ -469,6 +545,7 @@ def run_training(args: argparse.Namespace) -> None:
     )
     print(f"Checkpoint: {checkpoint_path}")
     print(f"History: {history_path}")
+    print(f"Training curves: {curves_path}")
     print(f"Results: {results_path}")
 
 
@@ -553,4 +630,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
