@@ -1,14 +1,15 @@
 """Neural-network models for Facebook page classification.
 
-This initial skeleton defines the interfaces for a feature-only MLP baseline
-and a two-layer Graph Convolutional Network. The layers and forward passes
-will be implemented in later development steps.
+This module contains a feature-only MLP baseline and a two-layer Graph
+Convolutional Network. Both models return raw class scores for use with
+CrossEntropyLoss.
 """
 
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
+from torch_geometric.nn import GCNConv
 
 
 class MLPBaseline(nn.Module):
@@ -23,17 +24,28 @@ class MLPBaseline(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.in_channels = in_channels
-        self.hidden_channels = hidden_channels
-        self.out_channels = out_channels
-        self.dropout_p = dropout_p
+        self.linear1 = nn.Linear(
+            in_channels,
+            hidden_channels,
+        )
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(
+            p=dropout_p,
+        )
+        self.linear2 = nn.Linear(
+            hidden_channels,
+            out_channels,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Return one class-score vector for every page."""
 
-        raise NotImplementedError(
-            "The MLP forward pass will be implemented next"
-        )
+        x = self.linear1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.linear2(x)
+
+        return x
 
 
 class TwoLayerGCN(nn.Module):
@@ -48,10 +60,18 @@ class TwoLayerGCN(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.in_channels = in_channels
-        self.hidden_channels = hidden_channels
-        self.out_channels = out_channels
-        self.dropout_p = dropout_p
+        self.conv1 = GCNConv(
+            in_channels,
+            hidden_channels,
+        )
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(
+            p=dropout_p,
+        )
+        self.conv2 = GCNConv(
+            hidden_channels,
+            out_channels,
+        )
 
     def forward(
         self,
@@ -60,6 +80,15 @@ class TwoLayerGCN(nn.Module):
     ) -> torch.Tensor:
         """Return one class-score vector for every graph node."""
 
-        raise NotImplementedError(
-            "The GCN forward pass will be implemented later"
+        x = self.conv1(
+            x,
+            edge_index,
         )
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.conv2(
+            x,
+            edge_index,
+        )
+
+        return x
