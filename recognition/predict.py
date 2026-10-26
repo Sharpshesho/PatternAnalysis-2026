@@ -1,8 +1,7 @@
-"""Prediction and evaluation for Facebook page classification.
+"""Checkpoint loading for Facebook page classification.
 
-This skeleton defines the planned steps for loading a trained model,
-predicting page categories, calculating metrics, and exporting results.
-The prediction and evaluation functions will be implemented later.
+This partial version restores a trained MLP or GCN from its checkpoint.
+Prediction, evaluation metrics, and result exports remain unfinished.
 """
 
 from __future__ import annotations
@@ -15,6 +14,8 @@ import torch
 import torch.nn as nn
 from torch_geometric.data import Data
 
+from train import create_model, load_checkpoint
+
 
 def load_trained_model(
     checkpoint_path: Path,
@@ -22,9 +23,29 @@ def load_trained_model(
 ) -> tuple[nn.Module, dict[str, Any]]:
     """Restore a model and its metadata from a training checkpoint."""
 
-    raise NotImplementedError(
-        "Checkpoint loading will be implemented next"
-    )
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(
+            f"Checkpoint was not found: {checkpoint_path}"
+        )
+
+    checkpoint = load_checkpoint(checkpoint_path, device)
+
+    required = {"model_config", "seed", "class_values"}
+    missing = required.difference(checkpoint)
+
+    if missing:
+        raise ValueError(
+            f"Checkpoint is missing metadata: {sorted(missing)}"
+        )
+
+    model = create_model(
+        **checkpoint["model_config"]
+    ).to(device)
+
+    model.load_state_dict(checkpoint["state_dict"])
+    model.eval()
+
+    return model, checkpoint
 
 
 def predict_scores(
@@ -35,7 +56,7 @@ def predict_scores(
     """Return class scores using model.eval() and torch.no_grad()."""
 
     raise NotImplementedError(
-        "The prediction forward pass will be implemented later"
+        "The prediction forward pass will be implemented next"
     )
 
 
