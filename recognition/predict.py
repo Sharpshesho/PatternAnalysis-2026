@@ -1,12 +1,15 @@
-"""Prediction and metric calculations for Facebook page classification.
+"""Prediction, evaluation, and result exports for Facebook page classification.
 
 This partial version restores a trained MLP or GCN, returns class scores,
-and evaluates a selected split. Exports and the full workflow remain unfinished.
+evaluates a selected split, and exports JSON and CSV results.
+Confusion-matrix plots and the full workflow remain unfinished.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
+import json
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +25,14 @@ from sklearn.metrics import (
 from torch_geometric.data import Data
 
 from train import create_model, load_checkpoint
+
+
+PAGE_CLASSES = {
+    "0": "TV show",
+    "1": "Government",
+    "2": "Company",
+    "3": "Politician",
+}
 
 
 def load_trained_model(
@@ -177,11 +188,120 @@ def save_prediction_outputs(
     mask: torch.Tensor,
     metrics: dict[str, Any],
 ) -> None:
-    """Save metrics, predictions, failure examples, and confusion plots."""
+    """Save metrics and prediction CSV files for a selected split."""
 
-    raise NotImplementedError(
-        "Prediction exports will be implemented later"
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
     )
+
+    class_values = [
+        str(value)
+        for value in data.class_values
+    ]
+    class_names = [
+        PAGE_CLASSES.get(value, value)
+        for value in class_values
+    ]
+
+    report = {
+        **metrics,
+        "class_values": class_values,
+        "class_names": class_names,
+    }
+
+    with (output_dir / "metrics.json").open(
+        "w",
+        encoding="utf-8",
+    ) as handle:
+        json.dump(
+            report,
+            handle,
+            indent=2,
+            allow_nan=False,
+        )
+
+    node_indices = (
+        mask.nonzero(as_tuple=False)
+        .flatten()
+        .cpu()
+        .tolist()
+    )
+    probabilities = (
+        outputs[mask]
+        .softmax(dim=1)
+        .detach()
+        .cpu()
+    )
+    confidences, predictions = probabilities.max(dim=1)
+    labels = data.y[mask].detach().cpu()
+
+    # Each mutual connection is stored once per direction in this dataset.
+    degrees = torch.bincount(
+        data.edge_index[0].detach().cpu(),
+        minlength=data.num_nodes,
+    )
+
+    rows = []
+
+    for row_index, node_index in enumerate(node_indices):
+        actual = int(labels[row_index])
+        predicted = int(predictions[row_index])
+
+        rows.append(
+            {
+                "node_index": node_index,
+                "page_name": data.page_name[node_index],
+                "true_label": actual,
+                "true_class": class_names[actual],
+                "predicted_label": predicted,
+                "predicted_class": class_names[predicted],
+                "confidence": float(confidences[row_index]),
+                "correct": predicted == actual,
+                "node_degree": int(degrees[node_index]),
+            }
+        )
+
+    failures = [
+        row for row in rows
+        if not row["correct"]
+    ]
+
+    # Candidate cases only: their causes still need written analysis.
+    failure_examples = sorted(
+        failures,
+        key=lambda row: row["confidence"],
+        reverse=True,
+    )[:5]
+
+    fieldnames = (
+        "node_index",
+        "page_name",
+        "true_label",
+        "true_class",
+        "predicted_label",
+        "predicted_class",
+        "confidence",
+        "correct",
+        "node_degree",
+    )
+
+    for filename, selected_rows in (
+        ("predictions.csv", rows),
+        ("incorrect_predictions.csv", failures),
+        ("failure_examples.csv", failure_examples),
+    ):
+        with (output_dir / filename).open(
+            "w",
+            encoding="utf-8",
+            newline="",
+        ) as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=fieldnames,
+            )
+            writer.writeheader()
+            writer.writerows(selected_rows)
 
 
 def run_prediction(args: argparse.Namespace) -> None:
