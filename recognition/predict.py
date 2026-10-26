@@ -182,6 +182,166 @@ def calculate_metrics(
     }
 
 
+def evaluate_confidence(
+    outputs: torch.Tensor,
+    labels: torch.Tensor,
+    mask: torch.Tensor,
+    threshold: float,
+) -> dict[str, Any]:
+    """Measure predictions accepted by a maximum-softmax threshold.
+
+    The score measures model confidence; it is not a calibrated probability
+    that the prediction is correct. Rejected pages are flagged for review.
+    """
+
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("The confidence threshold must be between 0 and 1")
+    if mask.dtype != torch.bool or mask.shape != labels.shape:
+        raise ValueError("Expected a Boolean mask with one value per node")
+    if not bool(mask.any()):
+        raise ValueError("The confidence evaluation split cannot be empty")
+
+    probabilities = outputs[mask].detach().cpu().softmax(dim=1)
+    confidences, predictions = probabilities.max(dim=1)
+    correct = predictions == labels[mask].detach().cpu()
+    accepted = confidences >= threshold
+
+    total = int(correct.numel())
+    accepted_count = int(accepted.sum().item())
+    accepted_correct = int(correct[accepted].sum().item())
+    accepted_errors = accepted_count - accepted_correct
+
+    # Accuracy is undefined when no predictions are accepted.
+    accepted_accuracy = None
+    accepted_error_rate = None
+    if accepted_count > 0:
+        accepted_accuracy = accepted_correct / accepted_count
+        accepted_error_rate = accepted_errors / accepted_count
+
+    return {
+        "threshold": float(threshold),
+        "total_count": total,
+        "accepted_count": accepted_count,
+        "rejected_count": total - accepted_count,
+        "coverage": accepted_count / total,
+        "accepted_correct": accepted_correct,
+        "accepted_errors": accepted_errors,
+        "accepted_accuracy": accepted_accuracy,
+        "accepted_error_rate": accepted_error_rate,
+    }
+
+
+def select_confidence_threshold(
+    outputs: torch.Tensor,
+    labels: torch.Tensor,
+    validation_mask: torch.Tensor,
+    min_coverage: float = 0.5,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Choose a threshold using validation labels only.
+
+    Maximise accepted accuracy while meeting the minimum validation coverage.
+    Break ties by greater coverage, then by a lower threshold. The minimum
+    coverage is an experiment setting, not an assignment requirement.
+    """
+
+    if not 0.0 < min_coverage <= 1.0:
+        raise ValueError("Minimum validation coverage must be above 0 and at most 1")
+
+    curve = []
+    for step in range(101):
+        result = evaluate_confidence(
+            outputs,
+            labels,
+            validation_mask,
+            threshold=step / 100.0,
+        )
+        curve.append(result)
+
+    eligible = [
+        result for result in curve
+        if result["coverage"] >= min_coverage
+    ]
+    best = max(
+        eligible,
+        key=lambda result: (
+            result["accepted_accuracy"],
+            result["coverage"],
+            -result["threshold"],
+        ),
+    )
+
+    rule = {
+        "confidence_measure": "maximum_softmax_score",
+        "selection_split": "val",
+        "minimum_validation_coverage": float(min_coverage),
+        "selection_rule": (
+            "Highest accepted validation accuracy; ties prefer greater "
+            "coverage, then a lower threshold"
+        ),
+        "threshold": best["threshold"],
+        "validation_results": best,
+    }
+    return rule, curve
+
+
+def save_confidence_analysis(
+    output_dir: Path,
+    rule: dict[str, Any],
+    curve: list[dict[str, Any]],
+) -> None:
+    """Save the validation threshold search separately from test results."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with (output_dir / "confidence_rule.json").open(
+        "w", encoding="utf-8"
+    ) as handle:
+        json.dump(rule, handle, indent=2, allow_nan=False)
+
+    with (output_dir / "validation_confidence_curve.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(curve[0]))
+        writer.writeheader()
+        writer.writerows(curve)
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    points = [
+        result for result in curve
+        if result["accepted_accuracy"] is not None
+    ]
+    figure, axis = plt.subplots(figsize=(7, 5))
+    axis.plot(
+        [result["coverage"] for result in points],
+        [result["accepted_accuracy"] for result in points],
+        marker=".",
+        label="Validation thresholds",
+    )
+    selected = rule["validation_results"]
+    axis.scatter(
+        selected["coverage"],
+        selected["accepted_accuracy"],
+        color="red",
+        zorder=3,
+        label=f"Selected threshold: {rule['threshold']:.2f}",
+    )
+    axis.set(
+        xlabel="Fraction of validation pages accepted (coverage)",
+        ylabel="Accuracy among accepted validation pages",
+        title="Validation accuracy and coverage",
+        xlim=(0, 1.02),
+        ylim=(0, 1.02),
+    )
+    axis.legend()
+    axis.grid(alpha=0.3)
+    figure.tight_layout()
+    figure.savefig(output_dir / "validation_confidence_curve.png", dpi=160)
+    plt.close(figure)
+
+
 def save_confusion_matrix(
     output_dir: Path,
     metrics: dict[str, Any],
@@ -323,9 +483,9 @@ def save_prediction_outputs(
     )
     probabilities = (
         outputs[mask]
-        .softmax(dim=1)
         .detach()
         .cpu()
+        .softmax(dim=1)
     )
     confidences, predictions = probabilities.max(dim=1)
     labels = data.y[mask].detach().cpu()
@@ -351,6 +511,11 @@ def save_prediction_outputs(
                 "predicted_label": predicted,
                 "predicted_class": class_names[predicted],
                 "confidence": float(confidences[row_index]),
+                "decision": (
+                    "accept"
+                    if float(confidences[row_index]) >= metrics["confidence_rule"]["threshold"]
+                    else "review"
+                ),
                 "correct": predicted == actual,
                 "node_degree": int(degrees[node_index]),
             }
@@ -376,6 +541,7 @@ def save_prediction_outputs(
         "predicted_label",
         "predicted_class",
         "confidence",
+        "decision",
         "correct",
         "node_degree",
     )
@@ -460,6 +626,21 @@ def run_prediction(args: argparse.Namespace) -> None:
         }
     )
 
+    # Choose the rule on validation pages, then apply it unchanged below.
+    rule, confidence_curve = select_confidence_threshold(
+        outputs,
+        data.y,
+        data.val_mask,
+        min_coverage=args.min_validation_coverage,
+    )
+    metrics["confidence_rule"] = rule
+    metrics["selective_prediction"] = evaluate_confidence(
+        outputs,
+        data.y,
+        mask,
+        threshold=rule["threshold"],
+    )
+
     run_dir = (
         args.output_dir
         / f"{model_name}_seed{seed}_{args.split}"
@@ -472,6 +653,8 @@ def run_prediction(args: argparse.Namespace) -> None:
         metrics,
     )
 
+    save_confidence_analysis(run_dir, rule, confidence_curve)
+
     auc = metrics["macro_auroc_ovr"]
     auc_text = "undefined" if auc is None else f"{auc:.4f}"
 
@@ -479,6 +662,19 @@ def run_prediction(args: argparse.Namespace) -> None:
     print(f"Accuracy: {metrics['accuracy']:.4f}")
     print(f"Macro-F1: {metrics['macro_f1']:.4f}")
     print(f"Macro AUROC (one-vs-rest): {auc_text}")
+    selective = metrics["selective_prediction"]
+    accepted_accuracy = selective["accepted_accuracy"]
+    accepted_text = (
+        "undefined" if accepted_accuracy is None
+        else f"{accepted_accuracy:.4f}"
+    )
+    print(f"Confidence threshold (selected on validation): {rule['threshold']:.2f}")
+    print(
+        f"Accepted pages: {selective['accepted_count']}/{selective['total_count']} "
+        f"(coverage {selective['coverage']:.2%})"
+    )
+    print(f"Accuracy among accepted pages: {accepted_text}")
+    print(f"Pages flagged for review: {selective['rejected_count']}")
     print(f"Saved prediction outputs to: {run_dir.resolve()}")
 
 
@@ -516,6 +712,16 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         type=Path,
         default=Path("outputs/predictions"),
+    )
+
+    parser.add_argument(
+        "--min-validation-coverage",
+        type=float,
+        default=0.5,
+        help=(
+            "Experiment setting: minimum fraction of validation predictions "
+            "accepted when choosing the confidence threshold (default: 0.5)"
+        ),
     )
 
     return parser.parse_args()
