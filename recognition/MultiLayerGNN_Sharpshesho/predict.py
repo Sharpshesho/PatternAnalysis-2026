@@ -30,11 +30,13 @@ from dataset import load_facebook_page_page
 from train import create_model, forward_model, load_checkpoint, resolve_device
 
 
+# The modified Gayanku archive encodes page_type categories alphabetically.
+# Verified against the original musae_facebook_target.csv records.
 PAGE_CLASSES = {
-    "0": "TV show",
+    "0": "Company",
     "1": "Government",
-    "2": "Company",
-    "3": "Politician",
+    "2": "Politician",
+    "3": "TV show",
 }
 
 
