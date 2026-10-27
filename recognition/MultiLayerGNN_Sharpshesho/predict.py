@@ -2,7 +2,7 @@
 
 Restore a trained MLP or GCN, evaluate a selected split, and export the results.
 Use the same facebook.npz archive as training; the checkpoint supplies the
-model configuration and seed needed to recreate the training split.
+model configuration and split seed needed to recreate the training split.
 """
 
 from __future__ import annotations
@@ -852,15 +852,18 @@ def run_prediction(args: argparse.Namespace) -> None:
     config = checkpoint["model_config"]
     model_name = config["model_name"]
     seed = int(checkpoint["seed"])
+    # Older checkpoints used the training seed for their data split too.
+    split_seed = int(checkpoint.get("split_seed", seed))
 
     print(f"> Device: {device}")
     print(
         f"> Loading {model_name.upper()} checkpoint (seed {seed})"
     )
+    print(f"> Data split seed: {split_seed}")
 
     data = load_facebook_page_page(
         args.data_path,
-        seed=seed,
+        seed=split_seed,
     )
 
     if int(data.x.shape[1]) != config["in_channels"]:
@@ -898,6 +901,8 @@ def run_prediction(args: argparse.Namespace) -> None:
         {
             "model": model_name,
             "seed": seed,
+            "split_seed": split_seed,
+            "split_ratios": list(data.split_ratios),
             "split": args.split,
             "best_epoch": checkpoint.get("best_epoch"),
             "checkpoint": str(args.checkpoint.resolve()),
