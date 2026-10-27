@@ -2,6 +2,7 @@
 
 The training mask updates model weights, the validation mask selects the best
 checkpoint, and the test mask is used once after model selection is complete.
+Separate training and split seeds let repeated runs use identical held-out pages.
 """
 
 from __future__ import annotations
@@ -331,11 +332,12 @@ def run_training(args: argparse.Namespace) -> None:
     device = resolve_device(args.device)
 
     print(f"> Device: {device}")
+    print(f"> Training seed: {args.seed} | Data split seed: {args.split_seed}")
     print("> Loading dataset")
 
     data = load_facebook_page_page(
         args.data_path,
-        seed=args.seed,
+        seed=args.split_seed,
     )
     data = data.to(device)
 
@@ -437,6 +439,8 @@ def run_training(args: argparse.Namespace) -> None:
                     "best_validation_macro_f1": best_validation_f1,
                     "validation_loss": best_validation_loss,
                     "seed": args.seed,
+                    "split_seed": int(data.split_seed),
+                    "split_ratios": list(data.split_ratios),
                     "class_values": list(data.class_values),
                 },
                 checkpoint_path,
@@ -456,7 +460,8 @@ def run_training(args: argparse.Namespace) -> None:
                 f"Validation Accuracy: "
                 f"{validation_metrics['accuracy']:.4f} "
                 f"Validation Macro-F1: "
-                f"{validation_metrics['macro_f1']:.4f}"
+                f"{validation_metrics['macro_f1']:.4f} | "
+                f"Elapsed: {time.perf_counter() - start_time:.3f} s"
             )
 
     training_seconds = time.perf_counter() - start_time
@@ -496,6 +501,8 @@ def run_training(args: argparse.Namespace) -> None:
     results = {
         "model": args.model,
         "seed": args.seed,
+        "split_seed": int(data.split_seed),
+        "split_ratios": list(data.split_ratios),
         "epochs_requested": args.epochs,
         "best_epoch": best_epoch,
         "device": str(device),
@@ -536,6 +543,7 @@ def run_training(args: argparse.Namespace) -> None:
     )
 
     print("> Final results")
+    print(f"Training loop time (including validation): {training_seconds:.3f} seconds")
     print(
         f"Best epoch: {best_epoch} | "
         f"Validation Macro-F1: "
@@ -601,6 +609,13 @@ def parse_args() -> argparse.Namespace:
         "--seed",
         type=int,
         default=42,
+        help="Seed for model initialization and training randomness",
+    )
+    parser.add_argument(
+        "--split-seed",
+        type=int,
+        default=42,
+        help="Seed for the data split; keep fixed across repeated training runs",
     )
     parser.add_argument(
         "--device",
