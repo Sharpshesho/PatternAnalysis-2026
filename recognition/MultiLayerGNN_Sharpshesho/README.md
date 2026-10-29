@@ -16,7 +16,11 @@ The feature-only MLP predicts from each page's input vector. The GCN combines th
 - [Classification results and training behaviour](#classification-results-and-training-behaviour)
 - [Computational cost](#computational-cost)
 - [Confidence, cutoff selection and review workload](#confidence-cutoff-selection-and-review-workload)
+- [Embedding visualisation and interpretation](#embedding-visualisation-and-interpretation)
+- [Five failure-case autopsies](#five-failure-case-autopsies)
+- [Engineering recommendation and limitations](#engineering-recommendation-and-limitations)
 - [Implementation, dependencies and reproduction](#implementation-dependencies-and-reproduction)
+- [Saved output guide](#saved-output-guide)
 - [Artificial Intelligence Usage Disclosure](#artificial-intelligence-usage-disclosure)
 - [References](#references)
 
@@ -189,6 +193,56 @@ For GCN seed 42, cutoff 0.95 accepts 2,584/4,493 pages: 2,554 correct and **30 w
 
 These curves show accepted accuracy versus coverage, rather than predicted probability versus observed correctness. Cutoffs differ by model/run and do not impose an identical target accuracy. The findings support confidence as an imperfect ranking signal. They do not prove calibration or guarantee correctness; highly confident mistakes remain.
 
+## Embedding visualisation and interpretation
+
+Both figures use **the same 2,000 uniformly sampled test pages out of 4,493**, selected without labels using seed 42. They project 64-dimensional first-hidden-layer representations after ReLU and before dropout. t-SNE settings are PCA initialisation, perplexity 30, automatic learning rate, 1,000 iterations and one worker. True labels supply colours after projection; they do not determine the sampling or coordinates. Saved coordinate files contain identical sampled node-ID sequences.
+
+![MLP hidden representations for 2000 test pages](figures/mlp_embedding_tsne.png)
+
+*Figure 7. MLP, seed 42. Colours show true categories.*
+
+![GCN hidden representations for the same 2000 test pages](figures/gcn_embedding_tsne.png)
+
+*Figure 8. GCN, seed 42. Same sampled pages and category colours as Figure 7.*
+
+The MLP projection has large Company and Politician groups, several Government groups and mixed colours centrally. The GCN projection shows broad regions for all four categories, while retaining central overlap and points of each category among others. Both representations therefore contain category structure, with residual ambiguity.
+
+These are separate nonlinear projections. Axes, orientations and global distances cannot be directly compared, and overlap does not identify a particular incorrect prediction. The figures provide qualitative local-structure evidence; shared-test metrics provide the quantitative basis for comparing the models.
+
+## Five failure-case autopsies
+
+These seed-42 examples were selected from incorrect test predictions after models and cutoffs were fixed. Four illustrate accepted confident errors and one a flagged error. They cover all four true categories and illustrate failure modes rather than providing a random frequency estimate. Each error is a false negative for its true category and a false positive for its predicted category.
+
+| Node | Page | True class | GCN prediction | GCN score | GCN decision | MLP prediction | MLP score |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 16052 | Senate of Canada - Sénat du Canada | Government | Politician | 1.000000 | accept | Politician | 0.7632 |
+| 9254 | Comedy Central UK | Company | TV show | 0.999980 | accept | TV show | 0.9973 |
+| 127 | GovX | Company | Government | 0.997667 | accept | Government | 0.9576 |
+| 247 | GO! Das Motormagazin | TV show | Company | 0.986061 | accept | TV show | 0.3876 |
+| 13895 | Carlos Bezerra Jr | Politician | Company | 0.334227 | review | Politician | 0.5678 |
+
+**1. Senate of Canada - Sénat du Canada (16052): institutional/individual boundary.** The archive label is Government, but GCN predicts Politician with a stored float32 score of 1.000000. Of 266 unique direct neighbours, 265 have Politician labels and one Government; all 161 training-labelled neighbours are Politician. MLP also predicts Politician, but at 0.7632, which its own rule flags. This neighbourhood supports a plausible mechanism for reinforcing the wrong institutional category. GCN accepts the error despite its extreme score. Follow-up work should inspect entity-type evidence and cross-category political connections, while retaining audits among accepted predictions.
+
+**2. Comedy Central UK (9254): company/television boundary.** The archive label is Company. Both models predict TV show with high scores (GCN 0.999980; MLP 0.9973). Fifteen of 16 neighbours have TV-show labels. The shared mistake suggests ambiguity in own-page features, with graph context consistent with the same wrong result. This does not establish that the archive annotation is wrong. Inspecting category definitions and institution-versus-programme examples would be more targeted than relying on score alone.
+
+**3. GovX (127): cross-category connections.** GCN predicts Government for a Company page at 0.997667. Its 71 neighbours include 60 Government, 9 Company and 2 TV-show pages; 32 of 38 training-labelled neighbours are Government. MLP also predicts Government (0.9576), and both rules accept the error. A dominant neighbour category different from the node's own label illustrates the limit of homophily. Entity-type features or modelling different edge roles are possible future remedies, not evaluated improvements.
+
+**4. GO! Das Motormagazin (247): graph context can hurt.** The label is TV show. MLP predicts that category at 0.3876 and flags it; GCN predicts Company at 0.986061 and accepts it. Nine of 11 neighbours are Company, and all six training-labelled neighbours are Company. This counters the assumption that every page benefits from aggregation. A future validation-based experiment could test a learned feature/graph mixture or residual path. Choosing such a rule after seeing this test example would require fresh evaluation data.
+
+**5. Carlos Bezerra Jr (13895): mixed evidence and a useful flag.** The label is Politician. Its five neighbours comprise two Politician and one each of Company, Government and TV show. GCN predicts Company at 0.334227, below its cutoff, so the mistake is flagged. MLP predicts Politician at 0.5678 and also flags it. The mixed local evidence is a plausible contributor to ambiguity. This demonstrates useful prioritisation, without implying that every flagged prediction is wrong.
+
+Neighbour counts use unique direct connections, excluding self-loops. Labels of neighbours were inspected **only after evaluation for diagnosis**, never provided to a network as input. These observations support hypotheses without proving causal attribution; feature/edge ablations would distinguish mechanisms. Names identify cases and are not model input. Proposed remedies are future experiments, and were not used to alter the reported test predictions.
+
+## Engineering recommendation and limitations
+
+Advance GCN as the stronger **prototype for this known graph**: it gains 12.49 accuracy percentage points and improves every class's mean recall at a practical measured CPU cost for whole-graph processing. Retain MLP as a simple reference and an option when connections are unavailable or resource constraints differ.
+
+Use the validation-selected rule as an initial policy subject to analyst capacity. It flags roughly 45% of pages, while approximately 1.11% of accepted predictions remain wrong. Retain sample-based audits of accepted outputs and prioritise institution/person and company/TV-show boundaries. Actual human-review accuracy, cost and turnaround were not measured, so the combined human/model service accuracy is unknown.
+
+One graph and one stratified split limit the conclusions. Three initialisation seeds measure training variability, rather than split or population uncertainty. No new-graph, temporal-change or out-of-distribution evaluation, depth ablation, extensive tuning or probability calibration was performed. The feature transformation is supplied upstream and is not reconstructed here. Checkpoints and cutoffs share the validation split; an independent calibration/selection subset would be preferable in a larger study.
+
+Further experiments should use fresh validation/evaluation data: calibration with reliability assessment, operating points tied to a real review budget, and feature/graph combinations that resist misleading neighbours. The present test errors provide explanations and should not become a basis for repeated tuning on this test set.
+
 ## Implementation, dependencies and reproduction
 
 `modules.py` defines both model classes. `dataset.py` loads and validates data and creates split masks. `train.py` trains, selects checkpoints and saves histories/curves. `predict.py` loads checkpoints and saves metrics, confidence decisions, timings, plots and examples. Trainable networks use PyTorch/PyG; NumPy supports archive loading and reporting.
@@ -245,6 +299,41 @@ foreach ($model in @("mlp", "gcn")) {
 ```
 
 Prediction saves class metrics, per-page decisions and figures without optimisation. Training recreates the checkpoints, so downloading weights is unnecessary. Fixed seeds support repeatability within the tested environment without guaranteeing bitwise identical results on every platform. Re-running these commands is optional when inspecting the already saved results.
+
+## Saved output guide
+
+Committed figures live in `figures/`. Full outputs can be regenerated using the commands above. Recorded training outputs are in `outputs/full`, main six-run evaluation outputs in `outputs/evaluation`, and seed-42 plotting outputs in `outputs/visualisations`.
+
+The folder `outputs/visualisations/gcn_seed42_test` contains:
+
+| Generated file(s) | Content and use |
+| --- | --- |
+| metrics.json | Overall/class metrics, split/checkpoint metadata, confidence and timing summaries |
+| predictions.csv | All 4,493 test predictions, scores, decisions and correctness |
+| incorrect_predictions.csv | The 339 GCN seed-42 test errors |
+| failure_examples.csv | Five highest-confidence errors; candidates requiring written diagnosis |
+| confusion_matrix.csv / confusion_matrix_normalized.csv / confusion_matrix.png | Raw counts, row proportions and heatmap |
+| embedding_tsne.csv / embedding_tsne_settings.json / embedding_tsne.png | Sampled IDs, coordinates, settings and image |
+| confidence_rule.json | Validation selection rule, cutoff and validation results |
+| validation_confidence_curve.csv / validation_confidence_curve.png | Cutoff-grid results and accuracy/coverage image |
+| inference_profile.json | Parameter count, timing scope, warmups, measurements and hardware metadata |
+
+All six runs inform the numerical conclusions. Seed-42 models supply detailed figures; the five error autopsies use a varied selection from incorrect predictions rather than only the top-five confidence list. Datasets, per-page output tables, virtual environments and trained weights stay outside the Git submission. Relevant tables and figure assets are included here.
+
+Example saved GCN output, seed 42:
+
+```text
+Evaluated pages: 4493
+Accuracy: 0.9245
+Macro-F1: 0.9192
+Macro AUROC (one-vs-rest): 0.9885
+Confidence threshold (selected on validation): 0.95
+Accepted pages: 2584/4493 (coverage 57.51%)
+Accuracy among accepted pages: 0.9884
+Pages flagged for review: 1909
+```
+
+Timing is reported separately because it varies across executions. Outputs represent the model's predictions and score-based decisions, without any manual corrections.
 
 ## Artificial Intelligence Usage Disclosure
 
