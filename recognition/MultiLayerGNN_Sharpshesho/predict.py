@@ -3,6 +3,18 @@
 Restore a trained MLP or GCN, evaluate a selected split, and export the results.
 Use the same facebook.npz archive as training; the checkpoint supplies the
 model configuration and split seed needed to recreate the training split.
+
+References:
+    Model architecture and operator attribution are documented in modules.py.
+    Course-linked dataset: https://github.com/gayanku/facebook_page-page_dataset
+    Original node labels used to verify the archive's category ordering:
+    https://github.com/gayanku/facebook_page-page_dataset/blob/main/facebook_large/musae_facebook_target.csv
+
+AI assistance:
+    OpenAI Codex assisted in generating, revising and debugging this code.
+    The README section "Artificial Intelligence Usage Disclosure" documents
+    the scope of assistance and the data audits, smoke runs, complete training
+    runs and saved-output checks used to verify the implementation.
 """
 
 from __future__ import annotations
