@@ -3,6 +3,18 @@
 The training mask updates model weights, the validation mask selects the best
 checkpoint, and the test mask is used once after model selection is complete.
 Separate training and split seeds let repeated runs use identical held-out pages.
+
+References:
+    GCN architecture: T. N. Kipf and M. Welling, ICLR 2017.
+    https://arxiv.org/abs/1609.02907
+    Course-linked dataset: https://github.com/gayanku/facebook_page-page_dataset
+    See modules.py and dataset.py for model/operator and data attribution.
+
+AI assistance:
+    OpenAI Codex assisted in generating, revising and debugging this code.
+    The README section "Artificial Intelligence Usage Disclosure" documents
+    the scope of assistance and the data audits, smoke runs, complete training
+    runs and saved-output checks used to verify the implementation.
 """
 
 from __future__ import annotations
