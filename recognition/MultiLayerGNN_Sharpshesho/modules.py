@@ -3,6 +3,19 @@
 This module contains a feature-only MLP baseline and a two-layer Graph
 Convolutional Network. Both models return raw class scores for use with
 CrossEntropyLoss.
+
+References:
+    Architecture: T. N. Kipf and M. Welling, Semi-Supervised Classification
+    with Graph Convolutional Networks, ICLR 2017.
+    https://arxiv.org/abs/1609.02907
+    Graph layers use the PyTorch Geometric GCNConv library operator:
+    https://pytorch-geometric.readthedocs.io/en/2.8.1/generated/torch_geometric.nn.conv.GCNConv.html
+
+AI assistance:
+    OpenAI Codex assisted in generating, revising and debugging this code.
+    The README section "Artificial Intelligence Usage Disclosure" documents
+    the scope of assistance and the data audits, smoke runs, complete training
+    runs and saved-output checks used to verify the implementation.
 """
 
 from __future__ import annotations
