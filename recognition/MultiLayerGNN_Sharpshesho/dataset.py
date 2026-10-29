@@ -3,6 +3,20 @@
 The course dataset is distributed as an .npz archive containing X, edges_x,
 edges_y, y, and page_name. This module validates those arrays, converts them
 to PyTorch tensors, and creates deterministic class-stratified splits.
+
+References:
+    Course-linked modified Facebook Page-Page archive (128 input features):
+    https://github.com/gayanku/facebook_page-page_dataset
+    Original node-ID/page-type labels used to verify the class-name mapping:
+    https://github.com/gayanku/facebook_page-page_dataset/blob/main/facebook_large/musae_facebook_target.csv
+    The supplied feature matrix is loaded directly; this module does not
+    reconstruct or refit the publisher's feature-compression procedure.
+
+AI assistance:
+    OpenAI Codex assisted in generating, revising and debugging this code.
+    The README section "Artificial Intelligence Usage Disclosure" documents
+    the scope of assistance and the data audits, smoke runs, complete training
+    runs and saved-output checks used to verify the implementation.
 """
 
 from __future__ import annotations
