@@ -13,6 +13,8 @@ The feature-only MLP predicts from each page's input vector. The GCN combines th
 - [Dataset, preprocessing and split design](#dataset-preprocessing-and-split-design)
 - [Models and working principles](#models-and-working-principles)
 - [Experimental protocol and evaluation metrics](#experimental-protocol-and-evaluation-metrics)
+- [Classification results and training behaviour](#classification-results-and-training-behaviour)
+- [Computational cost](#computational-cost)
 - [Implementation, dependencies and reproduction](#implementation-dependencies-and-reproduction)
 - [Artificial Intelligence Usage Disclosure](#artificial-intelligence-usage-disclosure)
 - [References](#references)
@@ -83,6 +85,74 @@ The split seed controls page membership. Training seeds change initial weights a
 Accuracy is the correct fraction of all predictions. For each class, precision is `TP/(TP+FP)` and recall is `TP/(TP+FN)`. F1 is `2 × precision × recall / (precision + recall)`, and macro-F1 averages the four class F1 values equally. This prevents the larger classes from dominating the reported score. AUROC is calculated per class against the other three using its softmax score, then averaged; it measures ranking rather than probability calibration.
 
 Unless stated otherwise, summaries are the mean and **sample SD across three training seeds** on one fixed split. Accuracy SD is in percentage points. These are not confidence intervals or results from three independent datasets. Seed 42 is used consistently for detailed figures and cases, rather than choosing the run with the highest test score.
+
+## Classification results and training behaviour
+
+All metrics below use the same 4,493 test pages. Flagged pages remain included in these overall classification results.
+
+| Model | Test accuracy, mean ± SD | Macro-F1, mean ± SD | Macro AUROC, mean ± SD |
+| --- | --- | --- | --- |
+| MLP | 80.04% ± 0.14 pp | 0.7808 ± 0.0025 | 0.9467 ± 0.0001 |
+| GCN | 92.53% ± 0.07 pp | 0.9200 ± 0.0007 | 0.9884 ± 0.0001 |
+
+GCN improves mean accuracy by **12.49 percentage points** and macro-F1 by **0.1392**. All three training seeds show a gain with small variation between initialisations. This supports graph context on this graph and split, without establishing significance across independent splits or generalisation to future pages.
+
+| Model | Training seed | Best epoch | Test accuracy | Test macro-F1 | Test macro AUROC |
+| --- | --- | --- | --- | --- | --- |
+| MLP | 42 | 195 | 80.12% | 0.7822 | 0.9467 |
+| MLP | 43 | 193 | 79.88% | 0.7779 | 0.9466 |
+| MLP | 44 | 196 | 80.12% | 0.7822 | 0.9468 |
+| GCN | 42 | 195 | 92.45% | 0.9192 | 0.9885 |
+| GCN | 43 | 192 | 92.59% | 0.9206 | 0.9885 |
+| GCN | 44 | 195 | 92.54% | 0.9201 | 0.9883 |
+
+The next table gives per-class three-seed means; support is constant because the test split is fixed.
+
+| Model | Class | Test support | Precision | Recall | F1 | OVR AUROC |
+| --- | --- | --- | --- | --- | --- | --- |
+| MLP | Company | 1299 | 0.8377 | 0.8448 | 0.8412 | 0.9555 |
+| MLP | Government | 1376 | 0.7744 | 0.8639 | 0.8167 | 0.9521 |
+| MLP | Politician | 1153 | 0.8005 | 0.8051 | 0.8028 | 0.9555 |
+| MLP | TV show | 665 | 0.7822 | 0.5744 | 0.6624 | 0.9238 |
+| GCN | Company | 1299 | 0.9312 | 0.9094 | 0.9202 | 0.9842 |
+| GCN | Government | 1376 | 0.9146 | 0.9542 | 0.9340 | 0.9892 |
+| GCN | Politician | 1153 | 0.9405 | 0.9506 | 0.9455 | 0.9928 |
+| GCN | TV show | 665 | 0.9096 | 0.8526 | 0.8802 | 0.9874 |
+
+TV show remains the hardest category, but mean recall improves from **57.44% to 85.26%** with GCN. Macro-F1 and class metrics expose this pattern beyond overall accuracy.
+
+![MLP training and validation loss, accuracy and macro-F1](figures/mlp_training_curves.png)
+
+*Figure 1. MLP, seed 42. Vertical dashed line: validation-selected epoch 195.*
+
+![GCN training and validation loss, accuracy and macro-F1](figures/gcn_training_curves.png)
+
+*Figure 2. GCN, seed 42. Vertical dashed line: validation-selected epoch 195.*
+
+Both improve rapidly, then flatten. MLP develops a clearer training/validation loss gap; GCN curves remain closer for this run. That is consistent with useful graph structure, but close curves alone cannot prove absence of overfitting or leakage. Selection uses the recorded validation criterion.
+
+![Row-normalised MLP test confusion matrix](figures/mlp_confusion_matrix.png)
+
+*Figure 3. MLP, seed 42. Rows: true classes; columns: predictions.*
+
+![Row-normalised GCN test confusion matrix](figures/gcn_confusion_matrix.png)
+
+*Figure 4. GCN, seed 42. Diagonal entries are class recall, rather than precision.*
+
+For GCN seed 42, correct counts are 1,180/1,299 Company, 1,313/1,376 Government, 1,093/1,153 Politician and 568/665 TV-show pages. The largest error counts are Company to Government (62), TV show to Company (59), and Company to TV show and Politician to Government (48 each). The figure rounds proportions; saved files retain exact counts.
+
+## Computational cost
+
+| Model | Parameters | Training/run, mean ± SD | Full-graph inference, mean ± SD | Peak GPU VRAM |
+| --- | --- | --- | --- | --- |
+| MLP | 8,516 | 3.06 ± 0.09 s | 0.427 ± 0.041 ms | N/A: CPU |
+| GCN | 8,516 | 22.29 ± 0.28 s | 23.733 ± 0.589 ms | N/A: CPU |
+
+Training time includes 200 epochs of optimisation, per-epoch training/validation evaluation and checkpoint saves. Loading, final testing and plotting are excluded. Each inference profile uses 5 untimed warmups and 30 timed evaluation-mode forwards. The table averages the three run-level means and gives their sample SD. It uses original `outputs/evaluation` profiles, without pooling additional timings created during t-SNE generation.
+
+One timed forward processes **all 22,470 nodes**, although classification metrics select only test pages. Timing excludes loading, transfers, metrics, cutoff search and plots; it is not isolated-page response latency. Profiles record Windows x86-64, processor descriptor `Intel64 Family 6 Model 198 Stepping 2, GenuineIntel`, 20 PyTorch CPU threads and `torch 2.14.1+cpu`. GPU VRAM is not applicable for CPU execution. Peak host memory was not measured.
+
+GCN training is about **7.28 times** slower and its full-graph forward about **55.59 times** slower. Aggregation over 342,004 directed entries and on-the-fly graph normalisation adds work despite equal parameter counts. Both remain practical for local experiments, with GCN full-graph inference averaging about 24 ms. These microbenchmarks exclude service overhead and do not establish deployment throughput.
 
 ## Implementation, dependencies and reproduction
 
