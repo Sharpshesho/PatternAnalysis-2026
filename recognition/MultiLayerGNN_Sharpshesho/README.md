@@ -15,6 +15,7 @@ The feature-only MLP predicts from each page's input vector. The GCN combines th
 - [Experimental protocol and evaluation metrics](#experimental-protocol-and-evaluation-metrics)
 - [Classification results and training behaviour](#classification-results-and-training-behaviour)
 - [Computational cost](#computational-cost)
+- [Confidence, cutoff selection and review workload](#confidence-cutoff-selection-and-review-workload)
 - [Implementation, dependencies and reproduction](#implementation-dependencies-and-reproduction)
 - [Artificial Intelligence Usage Disclosure](#artificial-intelligence-usage-disclosure)
 - [References](#references)
@@ -153,6 +154,40 @@ Training time includes 200 epochs of optimisation, per-epoch training/validation
 One timed forward processes **all 22,470 nodes**, although classification metrics select only test pages. Timing excludes loading, transfers, metrics, cutoff search and plots; it is not isolated-page response latency. Profiles record Windows x86-64, processor descriptor `Intel64 Family 6 Model 198 Stepping 2, GenuineIntel`, 20 PyTorch CPU threads and `torch 2.14.1+cpu`. GPU VRAM is not applicable for CPU execution. Peak host memory was not measured.
 
 GCN training is about **7.28 times** slower and its full-graph forward about **55.59 times** slower. Aggregation over 342,004 directed entries and on-the-fly graph normalisation adds work despite equal parameter counts. Both remain practical for local experiments, with GCN full-graph inference averaging about 24 ms. These microbenchmarks exclude service overhead and do not establish deployment throughput.
+
+## Confidence, cutoff selection and review workload
+
+Confidence is the largest softmax score. At cutoff `t`, accept when `confidence >= t`, otherwise flag for review. Coverage is `accepted_count / total_count`; accepted accuracy is the correct fraction within that subset; flagged percentage is `100 × (1 - coverage)`. Flagging does not erase pages or exclude their errors from overall accuracy.
+
+For each trained checkpoint, `predict.py` tests cutoffs 0.00, 0.01, ..., 1.00 on **validation labels only**. It maximises accepted validation accuracy subject to accepting at least 50% of validation pages. Ties favour greater coverage, then a lower cutoff. The 50% minimum is this experiment's operating constraint, not a confidence threshold or course performance requirement. The selected rule is fixed for testing. There is no test-label-based threshold tuning or temperature calibration.
+
+| Model | Seed | Selected cutoff | Test coverage | Test accepted accuracy | Test flagged | Errors accepted |
+| --- | --- | --- | --- | --- | --- | --- |
+| MLP | 42 | 0.83 | 51.06% | 95.68% | 48.94% | 99 |
+| MLP | 43 | 0.83 | 51.88% | 95.50% | 48.12% | 105 |
+| MLP | 44 | 0.83 | 51.24% | 95.83% | 48.76% | 96 |
+| GCN | 42 | 0.95 | 57.51% | 98.84% | 42.49% | 30 |
+| GCN | 43 | 0.96 | 54.42% | 98.94% | 45.58% | 26 |
+| GCN | 44 | 0.96 | 54.31% | 98.89% | 45.69% | 27 |
+
+| Model | Accepted accuracy, mean ± SD | Flagged, mean ± SD | Fraction of errors flagged, mean ± SD | Flagged-group accuracy, mean |
+| --- | --- | --- | --- | --- |
+| MLP | 95.67% ± 0.17 pp | 48.61% ± 0.43 pp | 88.85% ± 0.44 pp | 63.52% |
+| GCN | 98.89% ± 0.05 pp | 44.59% ± 1.82 pp | 91.76% ± 0.54 pp | 84.61% |
+
+GCN accepted-subset accuracy averages **98.89%**, while its overall test accuracy remains **92.53%**. About **44.59%** of pages are flagged, capturing **91.76%** of its errors. The workload is substantial: **84.61% of flagged GCN predictions are actually correct**. Flagging therefore prioritises uncertainty without asserting that a prediction is wrong.
+
+For GCN seed 42, cutoff 0.95 accepts 2,584/4,493 pages: 2,554 correct and **30 wrong**, giving 98.84% accepted accuracy. The remaining 1,909 pages contain 309 of 339 errors. On validation, that rule accepted 2,541/4,495 pages at 98.66% accuracy; validation and test coverage need not match.
+
+![MLP accepted validation accuracy against coverage](figures/mlp_validation_confidence.png)
+
+*Figure 5. MLP seed-42 selection, score cutoff 0.83.*
+
+![GCN accepted validation accuracy against coverage](figures/gcn_validation_confidence.png)
+
+*Figure 6. GCN seed-42 selection, score cutoff 0.95.*
+
+These curves show accepted accuracy versus coverage, rather than predicted probability versus observed correctness. Cutoffs differ by model/run and do not impose an identical target accuracy. The findings support confidence as an imperfect ranking signal. They do not prove calibration or guarantee correctness; highly confident mistakes remain.
 
 ## Implementation, dependencies and reproduction
 
